@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Cấu hình môi trường
+.env
+*.env
+
+# Thư mục instance (Flask)
+instance/
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# VSCode settings
+.vscode/
+
+# Log files
+*.log
+
+# MacOS
+.DS_Store
+
+# Test cache
+.pytest_cache/
