@@ -53,48 +53,70 @@ def add_transaction(current_user):
 @transaction_bp.route('/', methods=['GET'])
 @token_required
 def get_transactions(current_user):
-    """Get all transactions for the current user with optional filters."""
-    # Parse query parameters
+    """Get all transactions for the current user with enhanced multi-field search."""
+    # Parse query parameters - Enhanced like admin routes
+    search = request.args.get('search', '')  # General search query
     type_filter = request.args.get('type')
     category_id = request.args.get('category_id')
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
     min_amount = request.args.get('min_amount')
     max_amount = request.args.get('max_amount')
-    keyword = request.args.get('keyword')
+    
+    # Enhanced search parameters
+    date_from = request.args.get('date_from') or start_date
+    date_to = request.args.get('date_to') or end_date
+    amount_min = request.args.get('amount_min') or min_amount
+    amount_max = request.args.get('amount_max') or max_amount
+    
+    # Pagination and sorting
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 10))
+    sort_by = request.args.get('sort_by', 'date')  # 'date', 'amount', 'category'
+    sort_order = request.args.get('sort_order', 'desc')  # 'asc', 'desc'
     
     # Build query
     query = {'user_id': current_user['sub']}
     
+    # Enhanced text search in multiple fields
+    if search:
+        query['$or'] = [
+            {'note': {'$regex': search, '$options': 'i'}},
+            {'category_name': {'$regex': search, '$options': 'i'}}
+        ]
+    
+    # Type filter
     if type_filter:
         query['type'] = type_filter
-    
+        
+    # Category filter
     if category_id:
         query['category_id'] = category_id
     
-    if start_date or end_date:
+    # Date range filter
+    if date_from or date_to:
         query['date'] = {}
-        if start_date:
-            query['date']['$gte'] = datetime.fromisoformat(start_date)
-        if end_date:
-            query['date']['$lte'] = datetime.fromisoformat(end_date)
+        if date_from:
+            query['date']['$gte'] = datetime.fromisoformat(date_from)
+        if date_to:
+            query['date']['$lte'] = datetime.fromisoformat(date_to)
     
-    if min_amount or max_amount:
+    # Amount range filter
+    if amount_min or amount_max:
         query['amount'] = {}
-        if min_amount:
-            query['amount']['$gte'] = float(min_amount)
-        if max_amount:
-            query['amount']['$lte'] = float(max_amount)
+        if amount_min:
+            query['amount']['$gte'] = float(amount_min)
+        if amount_max:
+            query['amount']['$lte'] = float(amount_max)
     
-    if keyword:
-        query['note'] = {'$regex': keyword, '$options': 'i'}
+    # Sort configuration
+    sort_field = sort_by
+    sort_direction = pymongo.DESCENDING if sort_order == 'desc' else pymongo.ASCENDING
     
     # Query database with pagination
     total = current_app.mongo_db.transactions.count_documents(query)
     transactions = current_app.mongo_db.transactions.find(query) \
-        .sort('date', pymongo.DESCENDING) \
+        .sort(sort_field, sort_direction) \
         .skip((page - 1) * per_page) \
         .limit(per_page)
     
@@ -112,8 +134,44 @@ def get_transactions(current_user):
         'pages': (total + per_page - 1) // per_page
     }), 200
 
+@transaction_bp.route('/search-suggestions', methods=['GET'])
+@transaction_bp.route('/search-suggestions/', methods=['GET'])
+@token_required
+def get_search_suggestions(current_user):
+    """Get search suggestions for autocomplete."""
+    try:
+        # Get unique notes and category names from user's transactions
+        pipeline = [
+            {'$match': {'user_id': current_user['sub']}},
+            {'$group': {
+                '_id': None,
+                'notes': {'$addToSet': '$note'},
+                'categories': {'$addToSet': '$category_name'}
+            }}
+        ]
+        
+        result = list(current_app.mongo_db.transactions.aggregate(pipeline))
+        
+        suggestions = []
+        if result:
+            # Add non-empty notes
+            if result[0].get('notes'):
+                suggestions.extend([note for note in result[0]['notes'] if note and note.strip()])
+            
+            # Add category names
+            if result[0].get('categories'):
+                suggestions.extend([cat for cat in result[0]['categories'] if cat and cat.strip()])
+        
+        # Remove duplicates and limit
+        unique_suggestions = list(set(suggestions))[:20]
+        
+        return jsonify({'suggestions': unique_suggestions}), 200
+    except Exception as e:
+        current_app.logger.error(f"Error getting search suggestions: {str(e)}")
+        return jsonify({'suggestions': [], 'error': str(e)}), 200
+
 @transaction_bp.route('/<transaction_id>', methods=['GET'])
-@transaction_bp.route('/<transaction_id>/', methods=['GET'])  # Also support trailing slash
+@transaction_bp.route('/<transaction_id>/', methods=['GET'])
 @token_required
 def get_transaction(current_user, transaction_id):
     """Get a specific transaction."""
@@ -133,7 +191,7 @@ def get_transaction(current_user, transaction_id):
     return jsonify(transaction), 200
 
 @transaction_bp.route('/<transaction_id>', methods=['PUT'])
-@transaction_bp.route('/<transaction_id>/', methods=['PUT'])  # Also support trailing slash
+@transaction_bp.route('/<transaction_id>/', methods=['PUT'])
 @token_required
 def update_transaction(current_user, transaction_id):
     """Update a transaction."""
@@ -192,7 +250,7 @@ def update_transaction(current_user, transaction_id):
     return jsonify({'message': 'Transaction updated successfully'}), 200
 
 @transaction_bp.route('/<transaction_id>', methods=['DELETE'])
-@transaction_bp.route('/<transaction_id>/', methods=['DELETE'])  # Also support trailing slash
+@transaction_bp.route('/<transaction_id>/', methods=['DELETE'])
 @token_required
 def delete_transaction(current_user, transaction_id):
     """Delete a transaction."""
@@ -214,9 +272,10 @@ def delete_transaction(current_user, transaction_id):
 @transaction_bp.route('/search/', methods=['GET'])
 @token_required
 def search_transactions(current_user):
-    """Advanced search for transactions."""
+    """Advanced search for transactions with enhanced multi-field search."""
     # Search parameters
     query_text = request.args.get('q', '')  # General search query
+    search = request.args.get('search', '') or query_text  # Support both parameters
     amount_min = request.args.get('amount_min')
     amount_max = request.args.get('amount_max')
     type_filter = request.args.get('type')
@@ -231,11 +290,11 @@ def search_transactions(current_user):
     # Build base query
     query = {'user_id': current_user['sub']}
     
-    # Text search in note and category name
-    if query_text:
+    # Enhanced text search in note and category name
+    if search:
         query['$or'] = [
-            {'note': {'$regex': query_text, '$options': 'i'}},
-            {'category_name': {'$regex': query_text, '$options': 'i'}}
+            {'note': {'$regex': search, '$options': 'i'}},
+            {'category_name': {'$regex': search, '$options': 'i'}}
         ]
     
     # Amount range filter
@@ -286,7 +345,7 @@ def search_transactions(current_user):
         'per_page': per_page,
         'pages': (total + per_page - 1) // per_page,
         'query': {
-            'text': query_text,
+            'text': search,
             'amount_min': amount_min,
             'amount_max': amount_max,
             'type': type_filter,

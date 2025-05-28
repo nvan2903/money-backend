@@ -273,6 +273,117 @@ def get_system_stats(current_user):
         'high_spenders': high_spenders
     }), 200
 
+@admin_bp.route('/users/<user_id>/statistics', methods=['GET'])
+@admin_bp.route('/users/<user_id>/statistics/', methods=['GET'])
+@token_required
+@admin_required
+def get_user_statistics(current_user, user_id):
+    """Get detailed statistics for a specific user (admin only)."""
+    try:
+        # Verify user exists
+        user = current_app.mongo_db.users.find_one({'_id': ObjectId(user_id)})
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+        
+        # Parameters
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+        
+        # Build base query
+        base_query = {'user_id': user_id}
+        
+        if date_from or date_to:
+            base_query['date'] = {}
+            if date_from:
+                base_query['date']['$gte'] = datetime.fromisoformat(date_from)
+            if date_to:
+                base_query['date']['$lte'] = datetime.fromisoformat(date_to)
+        
+        # Income vs Expense totals
+        income_total = sum(t['amount'] for t in current_app.mongo_db.transactions.find({**base_query, 'type': 'income'}))
+        expense_total = sum(t['amount'] for t in current_app.mongo_db.transactions.find({**base_query, 'type': 'expense'}))
+        
+        # Transaction count
+        total_transactions = current_app.mongo_db.transactions.count_documents(base_query)
+        
+        # Category breakdown (expenses)
+        expense_pipeline = [
+            {'$match': {**base_query, 'type': 'expense'}},
+            {'$group': {
+                '_id': '$category_name',
+                'total': {'$sum': '$amount'},
+                'count': {'$sum': 1}
+            }},
+            {'$sort': {'total': -1}}
+        ]
+        expense_by_category = list(current_app.mongo_db.transactions.aggregate(expense_pipeline))
+        
+        # Category breakdown (income)
+        income_pipeline = [
+            {'$match': {**base_query, 'type': 'income'}},
+            {'$group': {
+                '_id': '$category_name',
+                'total': {'$sum': '$amount'},
+                'count': {'$sum': 1}
+            }},
+            {'$sort': {'total': -1}}
+        ]
+        income_by_category = list(current_app.mongo_db.transactions.aggregate(income_pipeline))
+        
+        # Monthly trend
+        monthly_pipeline = [
+            {'$match': base_query},
+            {'$group': {
+                '_id': {
+                    'year': {'$year': '$date'},
+                    'month': {'$month': '$date'},
+                    'type': '$type'
+                },
+                'total': {'$sum': '$amount'}
+            }},
+            {'$sort': {'_id.year': 1, '_id.month': 1}}
+        ]
+        monthly_data = list(current_app.mongo_db.transactions.aggregate(monthly_pipeline))
+        
+        # Organize monthly data
+        monthly_trends = {}
+        for item in monthly_data:
+            key = f"{item['_id']['year']}-{item['_id']['month']:02d}"
+            if key not in monthly_trends:
+                monthly_trends[key] = {'income': 0, 'expense': 0}
+            monthly_trends[key][item['_id']['type']] = item['total']
+        
+        # Convert to list
+        monthly_list = []
+        for month, data in sorted(monthly_trends.items()):
+            monthly_list.append({
+                'month': month,
+                'income': data['income'],
+                'expense': data['expense'],
+                'balance': data['income'] - data['expense']
+            })
+        
+        # Average transaction amounts
+        avg_income = income_total / max(1, len(list(current_app.mongo_db.transactions.find({**base_query, 'type': 'income'}))))
+        avg_expense = expense_total / max(1, len(list(current_app.mongo_db.transactions.find({**base_query, 'type': 'expense'}))))
+        
+        return jsonify({
+            'summary': {
+                'total_income': income_total,
+                'total_expense': expense_total,
+                'balance': income_total - expense_total,
+                'transaction_count': total_transactions,
+                'average_income': avg_income,
+                'average_expense': avg_expense
+            },
+            'expense_by_category': expense_by_category,
+            'income_by_category': income_by_category,
+            'monthly_trends': monthly_list
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'message': f'Invalid user ID: {str(e)}'}), 400
+
 @admin_bp.route('/reports/generate', methods=['POST'])
 @admin_bp.route('/reports/generate/', methods=['POST'])
 @token_required
